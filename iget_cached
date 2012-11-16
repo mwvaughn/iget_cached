@@ -1,0 +1,82 @@
+#!/bin/bash
+
+umask u+rwx
+
+# iget_cached.sh -frVT /iplant/home/vaughn/sample_seq_leafmid.fa
+
+ARGS="$@"
+URI=
+CACHE=$SCRATCH/iget-cache
+OPTS=
+
+# Make sure cache folder exists
+mkdir -p $CACHE
+PID=$PPID
+
+# Pull out the iRODS URI from argument list
+# Assemble list of opts
+## This is less robust than I'd like
+
+for arg in "$@"
+do
+
+ if [[ "$arg" =~ "iplant/home" ]]
+ then
+ 	URI=$arg
+ 	echo $URI
+ fi
+ 
+ if [[ "$arg" =~ "^-" ]]
+ then
+ 	OPTS="$arg $OPTS"
+ fi
+ 
+done
+
+# fail if URI is empty
+#
+if [ -z "$URI" ];
+	then "Unable to resolve valid iRODS path"
+	exit 1
+fi
+
+echo "CMD: iget $OPTS $URI"
+
+BASE=$(basename $URI)
+
+# Get md5 hex of the URI
+# This is the operating filename in the cache
+URI_HASH=$(echo "$URI" | md5sum | awk '{ print $1 }')
+
+# Does CACHE/URI_HASH exist?
+#
+if [ ! -f $CACHE/$URI_HASH ];
+## No... fetch it
+then
+	echo -n "Fetch: $URI -> $BASE"
+	iget $OPTS $URI $CACHE/$URI_HASH && ln -sf $CACHE/$URI_HASH $BASE
+else
+## Compare the iRODS and local checksum
+	LOCAL_CK=$(md5sum $CACHE/$URI_HASH | awk '{ print $1 }')
+	IRODS_CK=$(ichksum ${URI} | head -n 1 | awk '{ print $2 }')
+	echo " md5sum: $LOCAL_CK"
+	echo "ichksum: $IRODS_CK"
+	
+	if [ "$LOCAL_CK" != "$IRODS_CK" ];
+	then
+		# Fetch to temporary file,
+		# Rename to URI_HASH when complete, and then
+		# Symlink URI_HASH to target name
+		# This gives us 'in-flight' behavior to escape 
+		# race conditions when multiple tasks cache same file
+		iget $OPTS $URI $CACHE/${URI_HASH}.${PID} && mv $CACHE/${URI_HASH}.${PID} $CACHE/${URI_HASH} && ln -sf $CACHE/$URI_HASH $BASE
+	else
+		# Symlink URI_HASH to target name
+		# Touch the original file. It's been requested
+		# so we want to make sure it doesn't get deleted
+		# during a SCRATCH purge
+		ln -fs $CACHE/$URI_HASH $BASE
+		touch $CACHE/$URI_HASH
+	fi
+fi
+
